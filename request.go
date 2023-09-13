@@ -37,11 +37,12 @@ type Request struct {
 	redirectPolicy RedirectPolicy
 	maxRedirects   int
 
-	retryPolicy   RetryPolicy
-	maxRetries    int
-	minRetryDelay time.Duration
-	maxRetryDelay time.Duration
-	sleepFn       func(d time.Duration) <-chan time.Time
+	retryPolicy        RetryPolicy
+	maxRetries         int
+	minRetryDelay      time.Duration
+	maxRetryDelay      time.Duration
+	retryCustomHandler func(resp *http.Response, err error) bool
+	sleepFn            func(d time.Duration) <-chan time.Time
 
 	timeout time.Duration
 
@@ -722,6 +723,9 @@ const (
 
 	// RetryAllErrors enables retrying of any error or 4xx/5xx status code.
 	RetryAllErrors
+
+	// RetryAllErrors enables retrying of any error or 4xx/5xx status code.
+	RetryCustomHandler
 )
 
 // WithRetryPolicy sets policy for retries.
@@ -849,6 +853,39 @@ func (r *Request) WithRetryDelay(minDelay, maxDelay time.Duration) *Request {
 
 	r.minRetryDelay = minDelay
 	r.maxRetryDelay = maxDelay
+
+	return r
+}
+
+// WithCustomHandler sets a custom func to handle a result as a failure or a success.
+//
+// The handler function argument expects you to return `true` if you want to retry
+// or `false` if you do not need to retry.
+//
+// Example:
+//
+//	req := NewRequestC(config, "POST", "/path")
+//	req.WithRetryPolicy(1)
+//	req. WithCustomHandler(func(resp *http.Response, err error) bool {
+//		return true
+//	})
+//	req.Expect().Status(http.StatusOK)
+func (r *Request) WithCustomHandler(handler func(resp *http.Response, err error) bool) *Request {
+	opChain := r.chain.enter("WithCustomHandler()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithCustomHandler()") {
+		return r
+	}
+
+	r.retryCustomHandler = handler
 
 	return r
 }
@@ -2369,6 +2406,9 @@ func (r *Request) shouldRetry(resp *http.Response, err error) bool {
 
 	case RetryAllErrors:
 		return err != nil || isHTTPError
+
+	case RetryCustomHandler:
+		return r.retryCustomHandler(resp, err)
 	}
 
 	return false
